@@ -2,74 +2,74 @@
 
 ## Module Map
 
-```
-┌──────────────────────────────────────┐
-│              cmd/radix                │
-│   Parse flags, load config, wire     │
-│   dependencies, start Agent          │
-├──────────────────────────────────────┤
-│           internal/agent              │
-│   ReAct loop, stream consumer,       │
-│   concurrent tool execution          │
-├─────────┬──────────┬────────────────┤
-│  llm    │  tool    │  memory        │
-│ Provider│ Registry │  Manager       │
-│ Types   │ + impl   │                │
-├─────────┴──────────┴────────────────┤
-│           internal/config            │
-│   .env / env var loading             │
-└──────────────────────────────────────┘
+```mermaid
+graph TB
+    A["<b>cmd/radix</b><br/>Parse flags, load config, wire dependencies, start Agent"]
+    B["<b>internal/agent</b><br/>ReAct loop, stream consumer, concurrent tool execution"]
+    
+    subgraph CoreComponents [Core Components]
+        direction LR
+        C["<b>llm</b><br/>Provider<br/>Types"]
+        D["<b>tool</b><br/>Registry<br/>+ impl"]
+        E["<b>memory</b><br/>Manager"]
+    end
+    
+    F["<b>internal/config</b><br/>.env / env var loading"]
+
+    A --- B
+    B --- CoreComponents
+    CoreComponents --- F
+    
+    style A fill:#f6f8fa,stroke:#d1d5da
+    style B fill:#f6f8fa,stroke:#d1d5da
+    style F fill:#f6f8fa,stroke:#d1d5da
+    style C fill:#ffffff,stroke:#d1d5da
+    style D fill:#ffffff,stroke:#d1d5da
+    style E fill:#ffffff,stroke:#d1d5da
 ```
 
-## Data Flow（一轮 ReAct）
+## Data Flow (One ReAct Turn)
 
-```
-User Input
-    │
-    ▼
-agent.Run()
-    │
-    ├─► memory.AddMessage(RoleUser, input)
-    │
-    ├─► memory.BuildRequest(tools)
-    │       └─► ChatRequest{Messages, Tools, SystemPrompt}
-    │
-    ├─► llm.ChatStream(ctx, req)
-    │       └─► HTTP POST → Anthropic SSE → ChatChunk channel
-    │
-    ├─► agent.consumeStream(chunks, errs)
-    │       ├─ 文本增量 → io.Writer (Phase 1: stdout)
-    │       └─ ToolCall 增量 → 累积为 ToolCall[]
-    │
-    ├─► 判断 FinishReason:
-    │       "stop"       → return nil  (done)
-    │       "tool_calls"  → continue
-    │
-    └─► agent.executeConcurrently(toolCalls)
-            ├─ tool.Execute(ctx, inputJSON)
-            └─ memory.AddMessage(RoleTool, result)
-                    └─► loop back to step 2
+```mermaid
+graph TD
+    U[User Input] --> A[agent.Run]
+    A --> step1[memory.AddMessage: RoleUser, input]
+    step1 --> step2[memory.BuildRequest: tools]
+    step2 -->|returns ChatRequest| step3[llm.ChatStream: ctx, req]
+    step3 -->|HTTP POST → SSE| step4[agent.consumeStream: chunks, errs]
+    
+    step4 -->|Text Delta| stdout[io.Writer]
+    step4 -->|ToolCall Delta| acc[Accumulate as ToolCall array]
+    
+    acc --> step5{Check FinishReason}
+    step5 -->|"stop"| done[return nil]
+    step5 -->|"tool_calls"| step6[agent.executeConcurrently: toolCalls]
+    
+    step6 --> exec[tool.Execute: ctx, inputJSON]
+    exec --> step7[memory.AddMessage: RoleTool, result]
+    step7 -->|loop back to step 2| step2
 ```
 
 ## Dependency Graph
 
+```mermaid
+graph LR
+    agent --> llm["llm.Provider (interface)"]
+    agent --> tool["tool.Registry (concrete)"]
+    agent --> memory["memory.Manager (concrete)"]
+    agent --> io["io.Writer (Phase 3: Bubble Tea)"]
+    
+    cmd --> config["config.Load()"]
+    cmd --> agentNew["agent.New(llm, tools, memory, os.Stdout)"]
 ```
-agent → llm.Provider (interface)
-agent → tool.Registry (concrete)
-agent → memory.Manager (concrete)
-agent → io.Writer        (Phase 3: replaced with Bubble Tea channel)
 
-cmd → config.Load()
-cmd → agent.New(llm, tools, memory, os.Stdout)
-```
-
-Agent 依赖三个可替换的东西（LLM Provider、工具集、输出目标），其余用 concrete struct。
+Agent depends on three replaceable components (LLM Provider, Tools, Output target), the rest use concrete structs.
 
 ## Phase Mapping
 
-| Phase | 改哪些模块 | 影响范围 |
+| Phase | Modules Changed | Impact Scope |
 |-------|-----------|---------|
-| Phase 1 | 全部新建 | - |
-| Phase 2 | `memory/` 实现压缩逻辑；`agent/` 加 turn counter | local |
-| Phase 3 | 新增 `tui/`；`cmd/` 换 output 实现 | agent 代码不改 |
-| Phase 4 | 新增 `mcp/`；`tool/` 加 MCP 适配器 | 通过 Tool interface 注入 |
+| Phase 1 | All new | - |
+| Phase 2 | `memory/` implements compression logic; `agent/` adds turn counter | local |
+| Phase 3 | Add `tui/`; `cmd/` changes output implementation | agent code unchanged |
+| Phase 4 | Add `mcp/`; `tool/` adds MCP adapter | injected via Tool interface |
